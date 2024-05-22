@@ -29,7 +29,7 @@ from rayllm.api_openai_backend.openai_protocol import ChatMessage, ErrorResponse
 from rayllm.api_openai_backend.tools import ChatPromptCapture, OpenAIToolsPrompter
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer, TextIteratorStreamer
 
 DEVICE_CPU = "cpu"
 DEVICE_HPU = "hpu"
@@ -401,6 +401,65 @@ class HPUPredictor(Predictor):
         )
 
 
+class CPUPredictor(Predictor):
+    def __init__(self, infer_conf: dict):
+        super().__init__(infer_conf)
+        hf_config = AutoConfig.from_pretrained(
+            infer_conf["model_id_or_path"],
+            torchscript=True,
+            trust_remote_code=infer_conf["trust_remote_code"],
+            use_auth_token=infer_conf["use_auth_token"]
+        )
+
+        # decide correct torch type for loading HF model
+        model = AutoModelForCausalLM.from_pretrained(
+            infer_conf["model_id_or_path"],
+            config=hf_config,
+            low_cpu_mem_usage=True,
+            trust_remote_code=infer_conf["trust_remote_code"],
+            use_auth_token=infer_conf["use_auth_token"]
+        )
+
+        model = model.eval().to(self.device)
+        self.model = model
+
+    def streaming_generate(self, prompt, streamer, **config):
+        input_ids, _ = self.tokenize_inputs(prompt)
+        self.model.generate(
+            input_ids,
+            stopping_criteria=self.stopping_criteria,
+            streamer=streamer,
+            **config,
+        )
+
+    def generate(self, input, **config):
+        if isinstance(input, tuple):
+            raise TypeError("TransformerPredictor doesn't support MLLM input.")
+
+        # Convert prompts to list
+        prompts = [input] if isinstance(input, str) else input
+
+        input_ids, input_length = self.tokenize_inputs(prompts)
+        gen_tokens = self.model.generate(
+            input_ids, stopping_criteria=self.stopping_criteria, **config
+        )
+
+        decode_result = self.tokenizer.batch_decode(gen_tokens, skip_special_tokens=True)
+        if isinstance(decode_result, list) and len(decode_result) > 1:
+            return decode_result
+        elif isinstance(decode_result, list) and len(decode_result) == 1:
+            decode_result = decode_result[0]
+        return GenerateResult(
+            text=decode_result,
+            input_length=input_length,
+            generate_length=gen_tokens.size()[1] - input_length,
+        )
+
+    def get_streamer(self):
+        return TextIteratorStreamer(
+            self.tokenizer, skip_prompt=True, timeout=0, skip_special_tokens=True
+        )
+    
 chat_processor = {
     "ChatModelLlama": ChatModelLLama,
     "ChatModelGptJ": ChatModelGptJ,
@@ -419,7 +478,10 @@ class LLMServe:
         self, infer_conf: dict, max_batch_size=_DEFAULT_MAX_BATCH_SIZE, max_num_seqs=_DEFAULT_MAX_NUM_SEQS
     ) -> None:
         # All the initialization code goes here
-        self.predictor = HPUPredictor(infer_conf)
+        if infer_conf["device"] == "hpu":
+            self.predictor = HPUPredictor(infer_conf)
+        elif infer_conf["device"] == "cpu":
+            self.predictor = CPUPredictor(infer_conf)
         self.loop = asyncio.get_running_loop()
         self.process_tool = chat_processor[infer_conf["chat_processor"]]()
         self.use_openai = False

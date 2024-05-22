@@ -58,7 +58,7 @@ def openai_serve_run(deployments, host, route_prefix, port, max_concurrent_queri
     return deployment_address
 
 
-def get_deployment_actor_options(hpus_per_worker, ipex_enabled=False):
+def get_deployment_actor_options(infer_conf, ipex_enabled=False):
     _ray_env_key = "env_vars"
     # OMP_NUM_THREADS will be set by num_cpus, so not set in env
     _predictor_runtime_env_ipex = {
@@ -71,8 +71,12 @@ def get_deployment_actor_options(hpus_per_worker, ipex_enabled=False):
     runtime_env: Dict[str, Any] = {_ray_env_key: {}}
     if ipex_enabled:
         runtime_env[_ray_env_key].update(_predictor_runtime_env_ipex)
-    ray_actor_options: Dict[str, Any] = {"runtime_env": runtime_env}
-    ray_actor_options["resources"] = {"HPU": hpus_per_worker}
+    if infer_conf["device"] == "hpu":
+        ray_actor_options: Dict[str, Any] = {"runtime_env": runtime_env}
+        ray_actor_options["resources"] = {"HPU": infer_conf["num_hpus_per_worker"]}
+    elif infer_conf["device"] == "cpu":
+        ray_actor_options = Dict[str, Any] = {"runtime_env": runtime_env}
+        ray_actor_options["num_cpus"] = infer_conf["num_cpus_per_worker"]
 
     return ray_actor_options
 
@@ -82,6 +86,7 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description="Serve LLM models with Ray Serve.", add_help=True)
     parser.add_argument("--port_number", default=8080, type=int, help="Port number to serve on.")
+    parser.add_argument("--hw_mode", default="hpu", type=str, help="Hardware mode to use, and the optional selection can be 'cpu' and 'hpu'.")
     parser.add_argument(
         "--model_id_or_path", default="meta-llama/Llama-2-7b-chat-hf", type=str, help="Model id or path."
     )
@@ -115,6 +120,7 @@ def main(argv=None):
     infer_conf["chat_processor"] = args.chat_processor
     infer_conf["max_batch_size"] = args.max_batch_size
     infer_conf["max_num_seqs"] = args.max_num_seqs
+    infer_conf["device"] == args.hw_mode
     infer_conf["num_replicas"] = args.num_replicas
     infer_conf["num_cpus_per_worker"] = args.num_cpus_per_worker
     infer_conf["num_hpus_per_worker"] = args.num_hpus_per_worker
@@ -124,7 +130,7 @@ def main(argv=None):
     print(f"infer_conf: {infer_conf}")
 
     deployment = {}
-    ray_actor_options = get_deployment_actor_options(infer_conf["num_hpus_per_worker"])
+    ray_actor_options = get_deployment_actor_options(infer_conf)
     deployment[model_name] = LLMServe.options(
         num_replicas=infer_conf["num_replicas"],
         ray_actor_options=ray_actor_options,

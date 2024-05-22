@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+FROM ubuntu:22.04
+
+ENV LANG C.UTF-8
+
+WORKDIR /root/rayllm
+
+# copy the source code to the package directory
+COPY ../../rayllm/ /root/rayllm
+
+# install the system dependencies
+RUN --mount=type=cache,target=/var/cache/apt apt-get update -y \
+    && apt-get install -y build-essential cmake wget curl git vim htop ssh net-tools \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# install the conda environment
+ENV CONDA_DIR /opt/conda
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+    /bin/bash ~/miniconda.sh -b -p /opt/conda
+ENV PATH $CONDA_DIR/bin:$PATH
+
+# setup conda env
+SHELL ["/bin/bash", "--login", "-c"]
+RUN --mount=type=cache,target=/opt/conda/pkgs conda init bash && \
+    unset -f conda && \
+    export PATH=$CONDA_DIR/bin/:${PATH} && \
+    conda config --add channels intel && \
+    conda install python==3.9
+
+RUN pip install -r /root/rayllm/docker/requirements.txt && \
+    pip install transformers>=4.38.0,<=4.38.1 intel_extension_for_pytorch==2.2.0 torch==2.2.0 oneccl_bind_pt==2.2.0 --extra-index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/cpu/us/
+
+# Used to invalidate docker build cache with --build-arg CACHEBUST=$(date +%s)
+ARG CACHEBUST=1
+COPY ./dev/scripts/install-oneapi.sh /tmp
+RUN /tmp/install-oneapi.sh
